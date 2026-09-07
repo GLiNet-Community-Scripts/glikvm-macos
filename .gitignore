@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+vendor/
+*.dmg
+*.exe
+*.zip
+.DS_Store
+test/*.pem
+test/mock-*.log
+test/mock-*.out

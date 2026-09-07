@@ -1,0 +1,127 @@
+// Mock GLKVM device, enough to exercise the client + mod without real hardware:
+//   - GET  /api/auth/check      -> {"ok":true}          (what "Add device" probes)
+//   - GET  /                    -> a "device UI" page with a live <video> (canvas stream, so the
+//                                  1:1 fit sees a real videoWidth/videoHeight) and a fullscreen
+//                                  button the mod clones for its 1:1 button; answers the client's
+//                                  is_pc_client handshake so the session shows as connected
+//   - POST /api/hid/print       -> records the "typed" text (what paste-local-clipboard sends)
+//
+//   openssl req -x509 -newkey rsa:2048 -nodes -keyout test/key.pem -out test/cert.pem -subj /CN=localhost -days 30
+//   node test/mockkvm.mjs 8443 MockKVM-A 1280 720 &
+//   node test/mockkvm.mjs 8444 MockKVM-B 1024 768 &
+// then in GLKVM: Local Access -> Add Device -> 127.0.0.1:8443 (the client accepts the self-signed cert).
+// Requests are logged to test/mock-<port>.log.
+import https from "node:https";
+import fs from "node:fs";
+const [port, name = "MockKVM", vw = "1280", vh = "720"] = process.argv.slice(2);
+if (!port) {
+  console.error("usage: node test/mockkvm.mjs <port> [name] [videoWidth] [videoHeight]");
+  process.exit(2);
+}
+const here = new URL("./", import.meta.url);
+const opts = { key: fs.readFileSync(new URL("key.pem", here)), cert: fs.readFileSync(new URL("cert.pem", here)) };
+const logf = new URL(`mock-${port}.log`, here);
+const log = (s) => fs.appendFileSync(logf, `${new Date().toISOString()} ${s}\n`);
+const page = `<!doctype html><html><head><meta charset="utf-8"><title>${name}</title>
+<style>
+html,body{margin:0;height:100%;background:#111;color:#ddd;font:14px sans-serif}
+#header{height:48px;background:#222;display:flex;align-items:center;gap:12px;padding:0 12px}
+#stage{position:absolute;top:48px;bottom:32px;left:0;right:0;overflow:auto}
+video{display:block}
+#footer{position:absolute;bottom:0;left:0;right:0;height:32px;background:#222;padding:0 12px;line-height:32px}
+.action-item{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid #555;border-radius:4px;cursor:pointer;color:#ddd}
+.gl-icon{width:1em;height:1em;fill:currentColor}
+</style></head><body>
+<svg style="display:none"><symbol id="gl-kvm-fullscreen" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol></svg>
+<div id="login" style="position:fixed;inset:0;background:#0d1117;display:none;align-items:center;justify-content:center;z-index:9">
+<form id="f" style="display:flex;flex-direction:column;gap:12px;width:300px;background:#161b22;border:1px solid #2a2f36;border-radius:10px;padding:28px">
+<div style="font-size:18px;font-weight:600;text-align:center;margin-bottom:6px">${name}</div>
+<input type="text" autocomplete="username" placeholder="Username" value="admin" style="padding:9px 10px;background:#0d1117;border:1px solid #2a2f36;border-radius:6px;color:#ddd">
+<input type="password" autocomplete="current-password" placeholder="Password" style="padding:9px 10px;background:#0d1117;border:1px solid #2a2f36;border-radius:6px;color:#ddd">
+<button type="button" class="ant-btn-primary" style="padding:9px;background:#3b82f6;border:none;border-radius:6px;color:#fff;font-weight:600;cursor:pointer">Log in</button>
+<div id="err" style="color:#f66;min-height:18px;text-align:center"></div></form>
+</div>
+<div id="header"><b>${name}</b><span id="status">device UI</span>
+ <div class="action-wrap"><div class="action-item" id="fs" title="Fullscreen"><span><svg class="gl-icon"><use xlink:href="#gl-kvm-fullscreen"></use></svg></span></div></div>
+ <div class="action-item" title="webterm" onclick="parent.postMessage(JSON.stringify({action:'open_webterm',deviceKey:window.__dk}),'*')">T</div>
+</div>
+<div id="stage"><video id="v" autoplay muted playsinline></video></div>
+<div id="footer">typed: <span id="typed"></span></div>
+<script>
+// login gate, SPA-style like the real device UI: the form disappears in place, no page reload
+const authed = /glmock_auth=1/.test(document.cookie);
+if (!authed) document.getElementById("login").style.display = "flex";
+// JS-driven like the real device UI (the client's iframe sandbox blocks native form submission)
+const doLogin = async () => {
+  const pw = document.querySelector('input[type=password]').value;
+  const r = await fetch("/api/login", { method: "POST", body: pw });
+  if (r.ok) document.getElementById("login").remove();
+  else document.getElementById("err").textContent = "Wrong password";
+};
+document.querySelector("#f button").addEventListener("click", doLogin);
+document.getElementById("f").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+const c = document.createElement("canvas"); c.width = ${vw}; c.height = ${vh};
+const g = c.getContext("2d");
+let n = 0;
+setInterval(() => { n++; g.fillStyle = "#123"; g.fillRect(0,0,c.width,c.height); g.fillStyle="#fff"; g.font="48px sans-serif"; g.fillText("${name} " + c.width + "x" + c.height + "  #" + n, 40, 100);
+  g.strokeStyle="#0f0"; g.lineWidth=4; g.strokeRect(2,2,c.width-4,c.height-4); }, 500);
+document.getElementById("v").srcObject = c.captureStream(10);
+window.addEventListener("message", (e) => {
+  let d; try { d = JSON.parse(e.data); } catch { return; }
+  if (d.action === "is_pc_client") {
+    window.__dk = d.deviceKey;
+    e.source.postMessage(JSON.stringify({ action: "device_key_accepted", deviceKey: d.deviceKey }), "*");
+    e.source.postMessage(JSON.stringify({ action: "mounted", deviceKey: d.deviceKey }), "*");
+    document.getElementById("status").textContent = "connected to client " + JSON.stringify(d.payload);
+  }
+});
+setInterval(() => fetch("/api/hid/typed").then(r => r.text()).then(t => document.getElementById("typed").textContent = t.slice(-60)), 1000);
+</script></body></html>`;
+const PASSWORD = "kvm123"; // what the login form accepts; the mod's remember-password flow is tested against it
+let typed = "";
+https
+  .createServer(opts, (req, res) => {
+    const url = new URL(req.url, "https://x");
+    log(`${req.method} ${req.url} ua=...${(req.headers["user-agent"] || "").slice(-30)} cookie=${req.headers.cookie || "-"}`);
+    if (url.pathname === "/api/login") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const ok = body === PASSWORD;
+        log(`LOGIN ${ok ? "ok" : "wrong"} pw=${JSON.stringify(body)}`);
+        res.statusCode = ok ? 200 : 403;
+        if (ok) res.setHeader("set-cookie", "glmock_auth=1; Path=/");
+        res.end(ok ? "ok" : "no");
+      });
+      return;
+    }
+    if (url.pathname === "/api/auth/check") {
+      res.setHeader("content-type", "application/json");
+      return res.end(JSON.stringify({ ok: true, result: { user: null } }));
+    }
+    if (url.pathname === "/api/hid/print") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        typed += body;
+        log(`PRINT limit=${url.searchParams.get("limit")} slow=${url.searchParams.get("slow")} body=${JSON.stringify(body)}`);
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ ok: true, result: {} }));
+      });
+      return;
+    }
+    if (url.pathname === "/api/hid/typed") return res.end(typed);
+    if (url.pathname.startsWith("/api/")) {
+      res.setHeader("content-type", "application/json");
+      return res.end(JSON.stringify({ ok: true, result: {} }));
+    }
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.setHeader("set-cookie", "auth_token=mock; Path=/; SameSite=Strict; HttpOnly");
+    res.end(page);
+  })
+  // MOCKKVM_HOST="" binds the wildcard address: on macOS that is the only way an unprivileged
+  // process can take a port below 1024 (the 1.5.1 client accepts no port in the host field, so 443 it is)
+  .listen(Number(port), process.env.MOCKKVM_HOST === "" ? void 0 : process.env.MOCKKVM_HOST || "127.0.0.1", () => {
+    log(`listening ${port}`);
+    console.log(`mock KVM "${name}" (${vw}x${vh}) on https://127.0.0.1:${port}  log: ${logf.pathname}`);
+  });

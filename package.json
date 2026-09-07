@@ -1,0 +1,26 @@
+{
+  "name": "glikvm-macos",
+  "version": "0.1.0-beta",
+  "private": true,
+  "license": "MIT",
+  "description": "Unofficial macOS GLKVM desktop client build (GL-iNet Comet / RM1 / RM10) with glikvm-mod applied",
+  "type": "module",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "bin": {
+    "glikvm-macos": "./glikvm-macos.mjs"
+  },
+  "scripts": {
+    "build": "node glikvm-macos.mjs build",
+    "install-app": "node glikvm-macos.mjs install",
+    "uninstall-app": "node glikvm-macos.mjs uninstall",
+    "start": "node glikvm-macos.mjs run",
+    "status": "node glikvm-macos.mjs status",
+    "package": "node glikvm-macos.mjs package"
+  },
+  "dependencies": {
+    "@electron/asar": "^4.2.1",
+    "@electron/get": "^5.1.0"
+  }
+}
